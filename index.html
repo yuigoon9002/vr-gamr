@@ -286,8 +286,8 @@
     }
 
     function tryControllerGrab(entry) {
+      if (!entry.inputSource) return;
       const pose = entry.grip.visible ? entry.grip : entry.controller;
-      if (!pose.visible) return;
       scene.updateMatrixWorld(true);
       pose.getWorldPosition(controllerPoint);
       tryGrabAt(entry, controllerPoint, pose);
@@ -362,13 +362,13 @@
 
         const trackedHand = handInputSource(entry.handedness);
         const pose = entry.grip.visible ? entry.grip : entry.controller;
-        const visible = pose.visible && !trackedHand;
+        const visible = Boolean(entry.inputSource) && !trackedHand;
         entry.handAnchor.visible = visible;
         entry.handModel.visible = visible;
 
-        // Some Quest runtimes expose controller input and a target-ray pose but
-        // do not mark the grip space visible. Copy whichever pose is available
-        // into a normal scene anchor so the rigged hand is still rendered.
+        // Some Quest runtimes expose controller input but do not mark either
+        // pose group visible. Copy whichever pose is available into a normal
+        // scene anchor whenever the controller input source is present.
         if (visible) {
           entry.handAnchor.position.copy(pose.position);
           entry.handAnchor.quaternion.copy(pose.quaternion);
