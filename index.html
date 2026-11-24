@@ -163,7 +163,7 @@
       if (entry.loadingHandedness === handedness) return;
       if (entry.handModel && entry.loadedHandedness === handedness) return;
       if (entry.handModel) {
-        entry.grip.remove(entry.handModel);
+        entry.handAnchor.remove(entry.handModel);
         entry.handModel = null;
       }
       entry.loadingHandedness = handedness;
@@ -172,7 +172,7 @@
         (gltf) => {
           // A controller can reconnect with the opposite handedness after the
           // user changes input mode, so discard any stale fallback first.
-          if (entry.handModel) entry.grip.remove(entry.handModel);
+          if (entry.handModel) entry.handAnchor.remove(entry.handModel);
           const model = gltf.scene;
           // The generic hand asset's fingers point down its local -Y axis. Quest
           // controller grip space points forward on -Z, so this keeps the hand
@@ -188,7 +188,7 @@
             }
           });
           model.visible = false;
-          entry.grip.add(model);
+          entry.handAnchor.add(model);
           entry.handModel = model;
           entry.loadedHandedness = handedness;
           entry.loadingHandedness = null;
@@ -207,9 +207,12 @@
     for (let index = 0; index < 2; index += 1) {
       const controller = renderer.xr.getController(index);
       const grip = renderer.xr.getControllerGrip(index);
+      const handAnchor = new THREE.Group();
+      handAnchor.visible = false;
       const entry = {
         controller,
         grip,
+        handAnchor,
         handedness: index === 0 ? 'left' : 'right',
         inputSource: null,
         handModel: null,
@@ -218,7 +221,7 @@
         selectPressed: false,
         squeezePressed: false
       };
-      playerRig.add(controller, grip);
+      playerRig.add(controller, grip, handAnchor);
       controllers.push(entry);
 
       controller.addEventListener('connected', (event) => {
@@ -280,10 +283,11 @@
     }
 
     function tryControllerGrab(entry) {
-      if (!entry.grip.visible) return;
+      const pose = entry.grip.visible ? entry.grip : entry.controller;
+      if (!pose.visible) return;
       scene.updateMatrixWorld(true);
-      entry.grip.getWorldPosition(controllerPoint);
-      tryGrabAt(entry, controllerPoint, entry.grip);
+      pose.getWorldPosition(controllerPoint);
+      tryGrabAt(entry, controllerPoint, pose);
     }
 
     function releaseGrab(holder) {
@@ -352,8 +356,22 @@
     function updateControllerHands() {
       for (const entry of controllers) {
         if (!entry.handModel) continue;
+
         const trackedHand = handInputSource(entry.handedness);
-        entry.handModel.visible = entry.grip.visible && !trackedHand;
+        const pose = entry.grip.visible ? entry.grip : entry.controller;
+        const visible = pose.visible && !trackedHand;
+        entry.handAnchor.visible = visible;
+        entry.handModel.visible = visible;
+
+        // Some Quest runtimes expose controller input and a target-ray pose but
+        // do not mark the grip space visible. Copy whichever pose is available
+        // into a normal scene anchor so the rigged hand is still rendered.
+        if (visible) {
+          entry.handAnchor.position.copy(pose.position);
+          entry.handAnchor.quaternion.copy(pose.quaternion);
+          entry.handAnchor.scale.copy(pose.scale);
+          entry.handAnchor.updateMatrixWorld(true);
+        }
       }
     }
 
