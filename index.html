@@ -129,7 +129,9 @@
     const controllerHandLoader = new GLTFLoader();
 
     function handInputSource(handedness) {
-      const hand = hands.find((candidate) => candidate.userData.inputSource?.handedness === handedness);
+      const hand = hands.find((candidate) => (
+        candidate.userData.inputSource?.handedness === handedness && candidate.visible
+      ));
       return hand?.userData.inputSource ?? null;
     }
 
@@ -221,6 +223,7 @@
         selectPressed: false,
         squeezePressed: false
       };
+      handAnchor.position.set(index === 0 ? -0.25 : 0.25, 1.25, -0.55);
       playerRig.add(controller, grip, handAnchor);
       controllers.push(entry);
       // Preload both rigged controller hands before the XR session connects.
@@ -362,14 +365,14 @@
 
         const trackedHand = handInputSource(entry.handedness);
         const pose = entry.grip.visible ? entry.grip : entry.controller;
-        const visible = Boolean(entry.inputSource) && !trackedHand;
+        const visible = renderer.xr.isPresenting && !trackedHand;
         entry.handAnchor.visible = visible;
         entry.handModel.visible = visible;
 
         // Some Quest runtimes expose controller input but do not mark either
-        // pose group visible. Copy whichever pose is available into a normal
-        // scene anchor whenever the controller input source is present.
-        if (visible) {
+        // pose group visible. Keep the fallback visible at its safe default
+        // position until a controller pose becomes available.
+        if (visible && pose.visible) {
           entry.handAnchor.position.copy(pose.position);
           entry.handAnchor.quaternion.copy(pose.quaternion);
           entry.handAnchor.scale.copy(pose.scale);
