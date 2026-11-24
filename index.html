@@ -367,7 +367,8 @@
 
         const trackedHand = handInputSource(entry.handedness);
         const pose = entry.grip.visible ? entry.grip : entry.controller;
-        const visible = renderer.xr.isPresenting && !trackedHand;
+        const controllerActive = Boolean(entry.inputSource?.gamepad);
+        const visible = renderer.xr.isPresenting && (controllerActive || !trackedHand);
         entry.handAnchor.visible = visible;
         entry.handModel.visible = visible;
 
