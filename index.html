@@ -125,6 +125,15 @@
     handModelFactory.setPath('./assets/hands/');
 
     const hands = [];
+    const fingerChains = {
+      thumb: ['thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal'],
+      index: ['index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal'],
+      middle: ['middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal'],
+      ring: ['ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal'],
+      pinky: ['pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal']
+    };
+    const poseAxis = new THREE.Vector3(1, 0, 0);
+    const poseRotation = new THREE.Quaternion();
     const controllers = [];
     const controllerHandLoader = new GLTFLoader();
 
@@ -162,6 +171,52 @@
       hand.addEventListener('squeezeend', () => releaseGrab(hand));
     }
 
+    function captureControllerBones(entry, model) {
+      entry.controllerBones = new Map();
+      entry.controllerRestPose = new Map();
+      model.traverse((child) => {
+        if (!child.isBone || !child.name) return;
+        entry.controllerBones.set(child.name, child);
+        entry.controllerRestPose.set(child.name, {
+          position: child.position.clone(),
+          quaternion: child.quaternion.clone(),
+          scale: child.scale.clone()
+        });
+      });
+      entry.poseBlend = 0;
+    }
+
+    function setControllerFingerCurl(entry, finger, curl) {
+      const chain = fingerChains[finger];
+      if (!chain) return;
+      chain.forEach((boneName, index) => {
+        const bone = entry.controllerBones.get(boneName);
+        const rest = entry.controllerRestPose.get(boneName);
+        if (!bone || !rest) return;
+        const segmentCurl = curl * (index === 0 ? 0.7 : 1.0);
+        poseRotation.setFromAxisAngle(poseAxis, segmentCurl);
+        bone.position.copy(rest.position);
+        bone.scale.copy(rest.scale);
+        bone.quaternion.copy(rest.quaternion).multiply(poseRotation);
+      });
+    }
+
+    function updateControllerHandPose(entry, delta) {
+      if (!entry.handModel || !entry.controllerBones) return;
+      const grabbing = entry.selectPressed || entry.squeezePressed || cube.userData.grabbedBy === entry;
+      const targetBlend = grabbing ? 1 : 0;
+      entry.poseBlend = THREE.MathUtils.damp(entry.poseBlend, targetBlend, 14, delta);
+
+      // Resting controller pose points with the index finger. Pressing trigger or
+      // grip smoothly curls every finger into a grab pose.
+      const blend = entry.poseBlend;
+      setControllerFingerCurl(entry, 'index', THREE.MathUtils.lerp(0, 1.05, blend));
+      setControllerFingerCurl(entry, 'middle', THREE.MathUtils.lerp(0.82, 1.18, blend));
+      setControllerFingerCurl(entry, 'ring', THREE.MathUtils.lerp(0.9, 1.24, blend));
+      setControllerFingerCurl(entry, 'pinky', THREE.MathUtils.lerp(0.98, 1.3, blend));
+      setControllerFingerCurl(entry, 'thumb', THREE.MathUtils.lerp(0.28, 0.78, blend));
+    }
+
     function loadControllerHand(entry) {
       const handedness = entry.handedness;
       if (entry.loadingHandedness === handedness) return;
@@ -191,6 +246,7 @@
               child.frustumCulled = false;
             }
           });
+          captureControllerBones(entry, model);
           model.visible = false;
           entry.handAnchor.add(model);
           entry.handModel = model;
@@ -361,10 +417,11 @@
       return Math.hypot(second[0], second[1]) > Math.hypot(first[0], first[1]) ? second : first;
     }
 
-    function updateControllerHands() {
+    function updateControllerHands(delta) {
       for (const entry of controllers) {
         if (!entry.handModel) continue;
 
+        updateControllerHandPose(entry, delta);
         const trackedHand = handInputSource(entry.handedness);
         const pose = entry.grip.visible ? entry.grip : entry.controller;
         const controllerActive = Boolean(entry.inputSource?.gamepad);
@@ -442,7 +499,7 @@
         pollControllerButtons();
         updateLocomotion(delta);
       }
-      updateControllerHands();
+      updateControllerHands(delta);
       renderer.render(scene, camera);
     });
   </script>
