@@ -130,7 +130,9 @@
 
     function handInputSource(handedness) {
       const hand = hands.find((candidate) => (
-        candidate.userData.inputSource?.handedness === handedness && candidate.visible
+        candidate.userData.inputSource?.handedness === handedness &&
+        candidate.visible &&
+        candidate.joints?.wrist?.visible
       ));
       return hand?.userData.inputSource ?? null;
     }
