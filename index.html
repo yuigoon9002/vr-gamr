@@ -214,7 +214,9 @@
         inputSource: null,
         handModel: null,
         loadedHandedness: null,
-        loadingHandedness: null
+        loadingHandedness: null,
+        selectPressed: false,
+        squeezePressed: false
       };
       playerRig.add(controller, grip);
       controllers.push(entry);
@@ -227,6 +229,8 @@
       controller.addEventListener('disconnected', () => {
         releaseGrab(entry);
         entry.inputSource = null;
+        entry.selectPressed = false;
+        entry.squeezePressed = false;
       });
       controller.addEventListener('selectstart', () => tryControllerGrab(entry));
       controller.addEventListener('selectend', () => releaseGrab(entry));
@@ -289,6 +293,46 @@
       scene.attach(cube);
       cube.userData.grabbedBy = null;
       cube.material = cubeRestMaterial;
+    }
+
+    function syncControllerSources() {
+      const session = renderer.xr.getSession();
+      if (!session) return;
+
+      const sources = Array.from(session.inputSources);
+      for (const entry of controllers) {
+        const source = sources.find((candidate) => (
+          candidate.handedness === entry.handedness && !candidate.hand && candidate.gamepad
+        ));
+        if (source) {
+          if (entry.inputSource !== source) {
+            entry.inputSource = source;
+            loadControllerHand(entry);
+          }
+        } else if (entry.inputSource && !sources.includes(entry.inputSource)) {
+          releaseGrab(entry);
+          entry.inputSource = null;
+          entry.selectPressed = false;
+          entry.squeezePressed = false;
+        }
+      }
+    }
+
+    function pollControllerButtons() {
+      for (const entry of controllers) {
+        const buttons = entry.inputSource?.gamepad?.buttons ?? [];
+        const selectPressed = Boolean(buttons[0]?.pressed);
+        const squeezePressed = Boolean(buttons[1]?.pressed);
+
+        if (selectPressed && !entry.selectPressed) tryControllerGrab(entry);
+        if (squeezePressed && !entry.squeezePressed) tryControllerGrab(entry);
+        if (!selectPressed && !squeezePressed && (entry.selectPressed || entry.squeezePressed)) {
+          releaseGrab(entry);
+        }
+
+        entry.selectPressed = selectPressed;
+        entry.squeezePressed = squeezePressed;
+      }
     }
 
     function applyDeadzone(value, deadzone = 0.15) {
@@ -366,7 +410,11 @@
     renderer.setAnimationLoop((time) => {
       const delta = Math.min((time - previousTime) / 1000, 0.05);
       previousTime = time;
-      if (renderer.xr.isPresenting) updateLocomotion(delta);
+      if (renderer.xr.isPresenting) {
+        syncControllerSources();
+        pollControllerButtons();
+        updateLocomotion(delta);
+      }
       updateControllerHands();
       renderer.render(scene, camera);
     });
