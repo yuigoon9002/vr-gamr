@@ -27,6 +27,7 @@
 <body>
   <script type="module">
     import * as THREE from 'three';
+    import { GLTFLoader } from './vendor/three/examples/jsm/loaders/GLTFLoader.js';
     import { VRButton } from './vendor/three/examples/jsm/webxr/VRButton.js';
     import { XRHandModelFactory } from './vendor/three/examples/jsm/webxr/XRHandModelFactory.js';
 
@@ -34,7 +35,14 @@
     scene.background = new THREE.Color(0xf8f8f8);
 
     const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
-    camera.position.set(0, 1.6, 2.2);
+    camera.position.set(0, 1.6, 0);
+
+    // The rig is the player's body. Moving and rotating it gives controller locomotion
+    // without changing the room or the tracked WebXR joint orientation.
+    const playerRig = new THREE.Group();
+    playerRig.position.set(0, 0, 2.2);
+    playerRig.add(camera);
+    scene.add(playerRig);
     camera.lookAt(0, 1.45, -1.2);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -50,7 +58,7 @@
     document.body.appendChild(renderer.domElement);
 
     document.body.appendChild(VRButton.createButton(renderer, {
-      optionalFeatures: ['hand-tracking']
+      optionalFeatures: ['hand-tracking', 'local-floor', 'bounded-floor']
     }));
 
     // A medium, plain white room: 6m wide, 6m deep, and 3m high.
@@ -91,7 +99,7 @@
     roomLight.shadow.camera.far = 10;
     scene.add(roomLight, roomLight.target);
 
-    // The one object in the room is the grab target.
+    // The only object in the room is the grab target.
     const cube = new THREE.Mesh(
       new THREE.BoxGeometry(0.24, 0.24, 0.24),
       new THREE.MeshStandardMaterial({
@@ -117,24 +125,105 @@
     handModelFactory.setPath('./assets/hands/');
 
     const hands = [];
+    const controllers = [];
+    const controllerHandLoader = new GLTFLoader();
+
+    function handInputSource(handedness) {
+      const hand = hands.find((candidate) => candidate.userData.inputSource?.handedness === handedness);
+      return hand?.userData.inputSource ?? null;
+    }
+
+    // Tracked hands use the WebXR joint-driven rigged models. The connected/disconnected
+    // source is also used to hide the controller fallback when bare hands are active.
     for (let index = 0; index < 2; index += 1) {
       const hand = renderer.xr.getHand(index);
       const handModel = handModelFactory.createHandModel(hand, 'mesh');
       hand.add(handModel);
-      scene.add(hand);
+      playerRig.add(hand);
+      hand.userData.inputSource = null;
       hands.push(hand);
 
-      hand.addEventListener('pinchstart', () => tryGrab(hand));
+      hand.addEventListener('connected', (event) => {
+        hand.userData.inputSource = event.data;
+      });
+      hand.addEventListener('disconnected', () => {
+        releaseGrab(hand);
+        hand.userData.inputSource = null;
+      });
+      hand.addEventListener('pinchstart', () => tryHandGrab(hand));
       hand.addEventListener('pinchend', () => releaseGrab(hand));
-      hand.addEventListener('selectstart', () => tryGrab(hand));
+      hand.addEventListener('selectstart', () => tryHandGrab(hand));
       hand.addEventListener('selectend', () => releaseGrab(hand));
-      hand.addEventListener('squeezestart', () => tryGrab(hand));
+      hand.addEventListener('squeezestart', () => tryHandGrab(hand));
       hand.addEventListener('squeezeend', () => releaseGrab(hand));
-      hand.addEventListener('disconnected', () => releaseGrab(hand));
+    }
+
+    function loadControllerHand(entry) {
+      const handedness = entry.handedness;
+      controllerHandLoader.load(
+        `./assets/hands/${handedness}.glb`,
+        (gltf) => {
+          const model = gltf.scene;
+          // The generic hand asset's fingers point down its local -Y axis. Quest
+          // controller grip space points forward on -Z, so this keeps the hand
+          // palm/fingers aligned with the controller instead of lying sideways.
+          model.rotation.x = Math.PI / 2;
+          model.position.set(0, -0.015, -0.035);
+          model.scale.setScalar(1.0);
+          model.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+              child.frustumCulled = false;
+            }
+          });
+          model.visible = false;
+          entry.grip.add(model);
+          entry.handModel = model;
+        },
+        undefined,
+        (error) => console.warn(`Unable to load ${handedness} controller hand`, error)
+      );
+    }
+
+    // Controller input is kept alongside hand tracking. When a Quest is using
+    // controllers, this shows a rigged hand fallback and makes trigger/grip input
+    // work. When bare hands are active, the real joint-driven hand model wins.
+    for (let index = 0; index < 2; index += 1) {
+      const controller = renderer.xr.getController(index);
+      const grip = renderer.xr.getControllerGrip(index);
+      const entry = {
+        controller,
+        grip,
+        handedness: index === 0 ? 'left' : 'right',
+        inputSource: null,
+        handModel: null
+      };
+      playerRig.add(controller, grip);
+      controllers.push(entry);
+      loadControllerHand(entry);
+
+      controller.addEventListener('connected', (event) => {
+        entry.inputSource = event.data;
+        entry.handedness = event.data.handedness || entry.handedness;
+      });
+      controller.addEventListener('disconnected', () => {
+        releaseGrab(entry);
+        entry.inputSource = null;
+      });
+      controller.addEventListener('selectstart', () => tryControllerGrab(entry));
+      controller.addEventListener('selectend', () => releaseGrab(entry));
+      controller.addEventListener('squeezestart', () => tryControllerGrab(entry));
+      controller.addEventListener('squeezeend', () => releaseGrab(entry));
     }
 
     const pinchPoint = new THREE.Vector3();
+    const controllerPoint = new THREE.Vector3();
     const cubeWorldPosition = new THREE.Vector3();
+    const stickForward = new THREE.Vector3();
+    const stickRight = new THREE.Vector3();
+    const stickMovement = new THREE.Vector3();
+    const cameraWorldQuaternion = new THREE.Quaternion();
 
     function getJointWorldPosition(hand, jointName, target) {
       const joint = hand.joints && hand.joints[jointName];
@@ -149,25 +238,35 @@
       return target.copy(indexTip).add(thumbTip).multiplyScalar(0.5);
     }
 
-    function tryGrab(hand) {
-      if (cube.userData.grabbedBy && cube.userData.grabbedBy !== hand) return;
-      if (cube.userData.grabbedBy === hand) return;
+    function tryGrabAt(holder, point, parent) {
+      if (cube.userData.grabbedBy && cube.userData.grabbedBy !== holder) return;
+      if (cube.userData.grabbedBy === holder) return;
 
       scene.updateMatrixWorld(true);
-      const point = getPinchWorldPosition(hand, pinchPoint);
-      if (!point) return;
-
       cube.getWorldPosition(cubeWorldPosition);
       if (point.distanceTo(cubeWorldPosition) > 0.22) return;
 
-      hand.updateWorldMatrix(true, false);
-      hand.attach(cube);
-      cube.userData.grabbedBy = hand;
+      parent.updateWorldMatrix(true, false);
+      parent.attach(cube);
+      cube.userData.grabbedBy = holder;
       cube.material = cubeHeldMaterial;
     }
 
-    function releaseGrab(hand) {
-      if (cube.userData.grabbedBy !== hand) return;
+    function tryHandGrab(hand) {
+      scene.updateMatrixWorld(true);
+      const point = getPinchWorldPosition(hand, pinchPoint);
+      if (point) tryGrabAt(hand, point, hand);
+    }
+
+    function tryControllerGrab(entry) {
+      if (!entry.grip.visible) return;
+      scene.updateMatrixWorld(true);
+      entry.grip.getWorldPosition(controllerPoint);
+      tryGrabAt(entry, controllerPoint, entry.grip);
+    }
+
+    function releaseGrab(holder) {
+      if (cube.userData.grabbedBy !== holder) return;
 
       scene.updateMatrixWorld(true);
       scene.attach(cube);
@@ -175,13 +274,83 @@
       cube.material = cubeRestMaterial;
     }
 
+    function applyDeadzone(value, deadzone = 0.15) {
+      const magnitude = Math.abs(value);
+      if (magnitude <= deadzone) return 0;
+      return Math.sign(value) * ((magnitude - deadzone) / (1 - deadzone));
+    }
+
+    function getThumbstick(source) {
+      const axes = source?.gamepad?.axes ?? [];
+      const first = [axes[0] || 0, axes[1] || 0];
+      if (axes.length < 4) return first;
+      const second = [axes[2] || 0, axes[3] || 0];
+      return Math.hypot(second[0], second[1]) > Math.hypot(first[0], first[1]) ? second : first;
+    }
+
+    function updateControllerHands() {
+      for (const entry of controllers) {
+        if (!entry.handModel) continue;
+        const trackedHand = handInputSource(entry.handedness);
+        entry.handModel.visible = entry.grip.visible && !trackedHand;
+      }
+    }
+
+    function updateLocomotion(delta) {
+      const left = controllers.find((entry) => entry.inputSource?.handedness === 'left')?.inputSource;
+      const right = controllers.find((entry) => entry.inputSource?.handedness === 'right')?.inputSource;
+      if (!left && !right) return;
+
+      const leftStick = getThumbstick(left);
+      const rightStick = getThumbstick(right);
+      const moveX = applyDeadzone(leftStick[0]);
+      const moveY = applyDeadzone(leftStick[1]);
+      const turnX = applyDeadzone(rightStick[0]);
+
+      // Smooth right-stick yaw. Pushing right turns the player right.
+      playerRig.rotation.y -= turnX * 1.9 * delta;
+
+      // Smooth left-stick movement, aligned to the headset's horizontal view.
+      camera.getWorldQuaternion(cameraWorldQuaternion);
+      stickForward.set(0, 0, -1).applyQuaternion(cameraWorldQuaternion);
+      stickForward.y = 0;
+      if (stickForward.lengthSq() > 0) stickForward.normalize();
+      stickRight.set(1, 0, 0).applyQuaternion(cameraWorldQuaternion);
+      stickRight.y = 0;
+      if (stickRight.lengthSq() > 0) stickRight.normalize();
+
+      stickMovement.set(0, 0, 0)
+        .addScaledVector(stickForward, -moveY)
+        .addScaledVector(stickRight, moveX);
+      if (stickMovement.lengthSq() > 1) stickMovement.normalize();
+      playerRig.position.addScaledVector(stickMovement, 1.5 * delta);
+
+      // Keep the player inside the room.
+      playerRig.position.x = THREE.MathUtils.clamp(playerRig.position.x, -2.65, 2.65);
+      playerRig.position.z = THREE.MathUtils.clamp(playerRig.position.z, -2.65, 2.65);
+    }
+
+    renderer.xr.addEventListener('sessionstart', () => {
+      playerRig.position.set(0, 0, 0);
+      playerRig.rotation.set(0, 0, 0);
+    });
+    renderer.xr.addEventListener('sessionend', () => {
+      playerRig.position.set(0, 0, 2.2);
+      playerRig.rotation.set(0, 0, 0);
+    });
+
     window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    renderer.setAnimationLoop(() => {
+    let previousTime = performance.now();
+    renderer.setAnimationLoop((time) => {
+      const delta = Math.min((time - previousTime) / 1000, 0.05);
+      previousTime = time;
+      if (renderer.xr.isPresenting) updateLocomotion(delta);
+      updateControllerHands();
       renderer.render(scene, camera);
     });
   </script>
