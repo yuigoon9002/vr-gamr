@@ -160,9 +160,19 @@
 
     function loadControllerHand(entry) {
       const handedness = entry.handedness;
+      if (entry.loadingHandedness === handedness) return;
+      if (entry.handModel && entry.loadedHandedness === handedness) return;
+      if (entry.handModel) {
+        entry.grip.remove(entry.handModel);
+        entry.handModel = null;
+      }
+      entry.loadingHandedness = handedness;
       controllerHandLoader.load(
         `./assets/hands/${handedness}.glb`,
         (gltf) => {
+          // A controller can reconnect with the opposite handedness after the
+          // user changes input mode, so discard any stale fallback first.
+          if (entry.handModel) entry.grip.remove(entry.handModel);
           const model = gltf.scene;
           // The generic hand asset's fingers point down its local -Y axis. Quest
           // controller grip space points forward on -Z, so this keeps the hand
@@ -180,9 +190,14 @@
           model.visible = false;
           entry.grip.add(model);
           entry.handModel = model;
+          entry.loadedHandedness = handedness;
+          entry.loadingHandedness = null;
         },
         undefined,
-        (error) => console.warn(`Unable to load ${handedness} controller hand`, error)
+        (error) => {
+          entry.loadingHandedness = null;
+          console.warn(`Unable to load ${handedness} controller hand`, error);
+        }
       );
     }
 
@@ -197,15 +212,17 @@
         grip,
         handedness: index === 0 ? 'left' : 'right',
         inputSource: null,
-        handModel: null
+        handModel: null,
+        loadedHandedness: null,
+        loadingHandedness: null
       };
       playerRig.add(controller, grip);
       controllers.push(entry);
-      loadControllerHand(entry);
 
       controller.addEventListener('connected', (event) => {
         entry.inputSource = event.data;
         entry.handedness = event.data.handedness || entry.handedness;
+        loadControllerHand(entry);
       });
       controller.addEventListener('disconnected', () => {
         releaseGrab(entry);
