@@ -223,6 +223,9 @@
       };
       playerRig.add(controller, grip, handAnchor);
       controllers.push(entry);
+      // Preload both rigged controller hands before the XR session connects.
+      // This makes the fallback independent of the timing of Quest's connected event.
+      loadControllerHand(entry);
 
       controller.addEventListener('connected', (event) => {
         entry.inputSource = event.data;
